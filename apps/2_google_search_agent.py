@@ -1,14 +1,15 @@
 from dotenv import load_dotenv
 from langchain.agents import create_agent
-from langchain_ollama import ChatOllama
+from langchain_groq import ChatGroq
 from langchain_tavily import TavilySearch
+from langgraph.checkpoint.memory import InMemorySaver
 
 load_dotenv()
 
 
 # 1. Initialize the local LLM
-llm = ChatOllama(
-    model="qwen3:8b",
+llm = ChatGroq(
+    model="openai/gpt-oss-120b",
     temperature=0,
 )
 
@@ -23,6 +24,7 @@ search_tool = TavilySearch(
 agent = create_agent(
     model=llm,
     tools=[search_tool],
+    checkpointer=InMemorySaver(),
     system_prompt="""
     You are a web research assistant.
 
@@ -53,7 +55,10 @@ while True:
         continue
 
     try:
-        response = agent.invoke({"messages": [{"role": "user", "content": query}]})
+        response = agent.invoke(
+            {"messages": [{"role": "user", "content": query}]},
+            {"configurable": {"thread_id": "1"}},
+        )
 
         print("\nAgent:")
         print(response["messages"][-1].content)
