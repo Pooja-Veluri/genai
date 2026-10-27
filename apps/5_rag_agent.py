@@ -3,78 +3,109 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
-from langchain_groq import ChatGroq
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import PyPDFLoader, PyPDFDirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_groq import ChatGroq
 from langchain_community.vectorstores import InMemoryVectorStore
-from langchain.tools import tool
 from langchain.agents import create_agent
+from langchain.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
+import streamlit as st
 
 
-# load documents
-loader = PyPDFLoader("/Users/poojaveluri/Documents/genai/data/medical_report.pdf")
-docs = loader.load()
+### data in st session
 
-# chunk documents
-splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-splitted_docs = splitter.split_documents(docs)
+if "document_uploaded" not in st.session_state:
+    st.session_state.document_uploaded = False
 
-# convert chunk to embeddings
-embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-2-preview")
+if "agent" not in st.session_state:
+    st.session_state.agent = None
 
-# store embeddings in vector db
-vector_store = InMemoryVectorStore.from_documents(
-    documents=splitted_docs,
-    embedding=embeddings,
-    persist_directory="./vector_rag_agent_db",
-)
+if "vector_store" not in st.session_state:
+    st.session_state.vector_store = None
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
 
-llm = ChatGroq(model="openai/gpt-oss-120b")
+def process_document(path):
+    ## load the documents
+    loader = PyPDFDirectoryLoader(path)
+    docs = loader.load()
 
+    ## split into chunks
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    docs = splitter.split_documents(documents=docs)
 
-# creating tool
-@tool
-def retrieve_context(query: str):
-    """
-    Retrieve documents relavant to the query from knowledge base
-    """
-    docs = vector_store.similarity_search(query=query, k=4)
-    context = " "
-    for doc in docs:
-        context = doc.page_content + "\n\n"
-    return context
+    ## embeddings and Vector DB
+    embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-2-preview")
+    vector_db = InMemoryVectorStore.from_documents(documents=docs, embedding=embeddings)
 
+    ## create a agent - tool, llm, prompt
+    llm = ChatGroq(model="openai/gpt-oss-20b")
 
-# define system prompt
-system_prompt = """You are a helpful assistant that answers questions using retrieved context. 
+    @tool
+    def retrieve_context(query: str):
+        """Retrieve documents relevant to a query from the knowledge base."""
+        context = ""
+        docs = vector_db.similarity_search(query=query, k=3)
+        for doc in docs:
+            context = doc.page_content + "\n\n"
+
+        return context
+
+    system_prompt = """You are a helpful assistant that answers questions using retrieved context. 
         My knowledge base consists of the details from the uploaded document. 
-        ALWAYS use the 'retrieve_context' tool for questions requiring external knowledge.
-        If you don't have information for the asked question in the knowledge base tell 'Sorry! i don't have sufficient information'"""
+        ALWAYS use the `retrieve_context` tool for questions requiring external knowledge."""
 
+    memory = InMemorySaver()
 
-# save memory
-memory = InMemorySaver()
-
-# agent creation = llm, tool, system_prompt
-agent = create_agent(
-    model=llm,
-    tools=[retrieve_context],
-    system_prompt=system_prompt,
-    checkpointer=memory,
-)
-
-
-while True:
-    query = input("User :")
-    if query.lower() == "quit":
-        break
-    result = agent.invoke(
-        {"messages": [{"role": "user", "content": query}]},
-        config={"configurable": {"thread_id": "1"}},
+    agent = create_agent(
+        model=llm,
+        tools=[retrieve_context],
+        system_prompt=system_prompt,
+        checkpointer=memory,
     )
-    response = result["messages"][-1].text
-    print("AI :", response)
+
+    st.session_state.agent = agent
+    st.session_state.document_uploaded = True
+
+
+### upload ui
+if not st.session_state.document_uploaded:
+    uploaded = st.file_uploader(
+        label="Select PDF Files", type=["pdf"], accept_multiple_files=True
+    )
+    if uploaded:
+        with st.spinner("Processing..."):
+            path = "./doc_files/"
+            for file in uploaded:
+                with open(path + file.name, "wb") as f:
+                    f.write(file.getvalue())
+
+            process_document(path)
+            st.rerun()
+
+
+## chat ui
+
+if st.session_state.document_uploaded and st.session_state.agent:
+    for message in st.session_state.messages:
+        role = message.get("role")
+        content = message.get("content")
+        st.chat_message(role).markdown(content)
+
+    query = st.chat_input("Ask anything related to uploaded documents....")
+    if query:
+        st.session_state.messages.append({"role": "user", "content": query})
+
+        st.chat_message("user").markdown(query)
+        response = st.session_state.agent.invoke(
+            {"messages": [{"role": "user", "content": query}]},
+            {"configurable": {"thread_id": 1}},
+        )
+
+        answer = response["messages"][-1].content
+        st.chat_message("ai").markdown(answer)
+        st.session_state.messages.append({"role": "ai", "content": answer})
